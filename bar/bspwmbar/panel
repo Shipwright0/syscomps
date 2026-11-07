@@ -1,0 +1,102 @@
+#! /bin/sh
+
+#variables
+MONITOR=${1:-eDP-1}
+WIDTH=${2:-1920}
+PANEL_FIFO=/tmp/panel_fifo
+PANEL_HEIGHT=40
+PANEL_WIDTH=$WIDTH
+PANEL_FONT="Iosevka Nerd Font Mono:size=12"
+PANEL_WM_NAME=bspwm_bar
+
+#start bar script
+if xdo id -a "$PANEL_WM_NAME" > /dev/null ; then
+	printf "%s\n" "The panel is already running." >&2
+	exit 1
+fi
+
+trap 'trap - TERM; kill 0' INT TERM QUIT EXIT
+
+[ -e "$PANEL_FIFO" ] && rm "$PANEL_FIFO"
+mkfifo "$PANEL_FIFO"
+
+#Volume grabs the active audio device and outputs its volume
+volume() {
+    #get the active sink
+    . "${HOME}/scripts/syncscripts/audioswap/sinkvar.sh"
+    vol=$(pamixer --sink $sink --get-volume)
+printf "%s\n" "VVol:$vol%"
+}
+#Output date and time
+time() {
+    dt=$(date '+%A, %B %d, %Y | %H:%M:%S')
+printf "%s\n" "S$dt"
+}
+#Battery
+battery() {
+BATC=/sys/class/power_supply/BAT0/capacity
+BATS=/sys/class/power_supply/BAT0/status
+# prepend percentage with a '+' if charging, '-' otherwise
+#[ "`cat $BATS`" = "Charging" ] && echo -n '+' || echo -n '-'
+
+#print out the content
+#sed -n p $BATC
+#print battery capacity and append a "+" or "-" depending on battery status
+bat=$([ "`cat $BATS`" = "Charging" ] && echo -n '+' || echo -n '-')$(sed -n p $BATC)
+
+printf "%s\n" "BBat:$bat%"
+}
+
+#Backlight
+backlight() {
+#Assign the brightness and max brightness from the systemfiles
+maxbrightness=/sys/class/backlight/intel_backlight/max_brightness
+brightness=/sys/class/backlight/intel_backlight/brightness
+
+#Use bc to perform arithmetic, cat to pull data from files, and sed to filter out zeros
+backlight=$(printf '%.0f\n' $(echo "scale=3 ; `cat $brightness` / `cat $maxbrightness` * 100" | bc)) 
+printf "%s\n" "LBL:$backlight%"
+}
+
+#network
+network() {
+# Grab the SSID of the wireless that is being connected to                            
+int=$(nmcli -t -f active,ssid dev wifi | egrep '^yes' | cut -d\' -f2 | sed 's/....//')
+              
+# Determine whether or not the outside world can be reached, if so show the SSID or disconnected if not                                   
+ping -c 1 9.9.9.9 >/dev/null 2>&1 && net="$int" || net="Disconnected"
+
+printf "%s\n" "NNet:$net"
+}
+
+#VPN (wireguard specific)
+vpn() {
+if nmcli device show wg0 2>/dev/null; then
+    vpnstate=$([ "`nmcli -t -f GENERAL.STATE device show wg0 2>/dev/null | egrep '^GENERAL' | cut -c 20-28`" = "connected" ] && echo -n 'Up' || echo -n 'Down')
+else
+    vpnstate="Down"
+fi
+# determine whether or not the wireguard connection is up
+#vpnstate=$([ "`nmcli -t -f GENERAL.STATE device show wg0 | egrep '^GENERAL' | cut -c 20-28`" = "connected" ] && echo -n 'Up' || echo -n 'Down')
+
+printf "%s\n" "PVPN:$vpnstate" 
+}
+
+bspc subscribe report > "$PANEL_FIFO" &
+
+#----------------Update Times----------------------
+while :; do time; sleep 1s; done > "$PANEL_FIFO" &
+while :; do volume; sleep 0.5s; done > "$PANEL_FIFO" &
+while :; do battery; sleep 5s; done > "$PANEL_FIFO" &
+while :; do backlight; sleep 1s; done > "$PANEL_FIFO" &
+while :; do network; sleep 2s; done > "$PANEL_FIFO" &
+while :; do vpn; sleep 2s; done > "$PANEL_FIFO" &
+#------------End Update Times----------------------
+. $HOME/syscomps/bar/bspwmbar/panel_colors
+
+$HOME/syscomps/bar/bspwmbar/panel_bar < "$PANEL_FIFO" | lemonbar -a 32 -u 2 -n "$PANEL_WM_NAME"  -g x"$PANEL_HEIGHT" -f "$PANEL_FONT" -F "$COLOR_DEFAULT_FG" -B "$COLOR_DEFAULT_BG" | sh &
+
+wid=$(xdo id -m -a "$PANEL_WM_NAME")
+xdo above -t "$(xdo id -N Bspwm -n root | sort | head -n 1)" "$wid"
+
+wait
